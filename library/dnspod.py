@@ -2,10 +2,11 @@
 # coding=utf-8
 
 import json
-import urllib
-import urllib2
+from urllib import request
+from urllib import parse
+from urllib.request import urlopen
 import logging
-from copy import copy
+import copy
 
 from ansible.module_utils.basic import AnsibleModule
 
@@ -26,7 +27,7 @@ EXAMPLES = '''
 
 def dns_api(path, token, **params):
     BASE_URL = 'https://dnsapi.cn'
-    http_params = copy(params)
+    http_params = copy.copy(params)
     http_params['login_token'] = token
     http_params['record_line'] = u'默认'
     http_params['format'] = 'json'
@@ -34,17 +35,17 @@ def dns_api(path, token, **params):
     encoded_params = {}
     for k, v in http_params.items():
         encoded_params[k.encode('utf-8')] = v.encode('utf-8')
-    req = urllib2.Request(url=BASE_URL + path,
-                          data=urllib.urlencode(encoded_params))
+    req = request.Request(url=BASE_URL + path,
+                          data=parse.urlencode(encoded_params).encode('utf-8'))
     try:
-        response = urllib2.urlopen(req)
-    except Exception, e:
+        response = urlopen(req)
+    except Exception as e:
         logger.error(e)
         return {}
     content = response.read()
     try:
         json_content = json.loads(content)
-    except Exception, e:
+    except Exception as e:
         logger.error(e)
         return {}
     assert json_content['status']['code'].startswith('1'), \
@@ -89,25 +90,37 @@ def record_present(sub_domain, base_domain, record_type, value, token):
                                    response.get('status', {}).get('message', 'unkown error'))
     return response['record']
 
-
-def record_disable(sub_domain, base_domain, token):
-    records = enabled_record_query(sub_domain, base_domain, token)
-    if len(records) == 0:
-        return None  # no change
-    assert len(records) == 1, 'records count is %d, domain: %s.%s' % (
-        len(records), sub_domain, base_domain)
-    response = dns_api(path='/Record.Modify',
+def record_force_create(sub_domain, base_domain, record_type, value, token):
+    """
+    https://www.dnspod.cn/docs/records.html#record-create
+    """
+    response = dns_api(path='/Record.Create',
                        token=token,
                        domain=base_domain,
-                       record_id=records[0]['id'],
                        sub_domain=sub_domain,
-                       record_type=records[0]['type'],
-                       status='disable',
-                       value=records[0]['value'], )
+                       record_type=record_type,
+                       value=value, )
     assert 'record' in response, \
         'code: %s, message: %s' % (response.get('status', {}).get('code', 'unkown code'),
                                    response.get('status', {}).get('message', 'unkown error'))
     return response['record']
+
+def record_remove(sub_domain, base_domain, token):
+    records = enabled_record_query(sub_domain, base_domain, token)
+    responses = []
+    if len(records) == 0:
+        return None  # no change
+    for record in records:
+        response = dns_api(path='/Record.Remove',
+                           token=token,
+                           domain=base_domain,
+                           record_id=record['id'],
+                           sub_domain=sub_domain, )
+        assert 'status' in response and response['status']['code'] == '1' , \
+            'code: %s, message: %s' % (response.get('status', {}).get('code', 'unkown code'),
+                                    response.get('status', {}).get('message', 'unkown error'))
+        responses.append(response)
+    return responses
 
 
 def record_modify(sub_domain, base_domain, record_type, value, status, token):
@@ -134,10 +147,10 @@ def main():
         argument_spec=dict(
             base_domain=dict(required=True),
             sub_domain=dict(required=True),
-            record_type=dict(choices=['A', 'CNAME']),
+            record_type=dict(choices=['A', 'CNAME', 'TXT']),
             value=dict(),
             token=dict(required=True),
-            state=dict(default='present', choices=['present', 'absent']),
+            state=dict(default='present', choices=['present', 'absent', 'create']),
         )
     )
 
@@ -157,19 +170,34 @@ def main():
                 module.exit_json(changed=False)
             else:
                 module.exit_json(changed=True)
-        except AssertionError, e:
-            module.fail_json(msg=e.message)
+        except AssertionError as e:
+            module.fail_json(msg=str(e))
+    elif module.params['state'] == 'create':
+        if module.params['record_type'] is None:
+            module.fail_json(msg="record_type required")
+        if module.params['value'] is None:
+            module.fail_json(msg="value required")
+
+        try:
+            record = record_force_create(sub_domain=module.params['sub_domain'],
+                                         base_domain=module.params['base_domain'],
+                                         record_type=module.params['record_type'],
+                                         value=module.params['value'],
+                                         token=module.params['token'])
+            module.exit_json(changed=True)
+        except AssertionError as e:
+            module.fail_json(msg=str(e))
     elif module.params['state'] == 'absent':
         try:
-            record = record_disable(sub_domain=module.params['sub_domain'],
+            record = record_remove(sub_domain=module.params['sub_domain'],
                                     base_domain=module.params['base_domain'],
                                     token=module.params['token'])
             if record is None:
                 module.exit_json(changed=False)
             else:
                 module.exit_json(changed=True)
-        except AssertionError, e:
-            module.fail_json(msg=e.message)
+        except AssertionError as e:
+            module.fail_json(msg=str(e))
 
 
 if __name__ == '__main__':
